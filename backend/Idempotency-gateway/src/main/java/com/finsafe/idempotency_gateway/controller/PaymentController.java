@@ -1,9 +1,9 @@
 package com.finsafe.idempotency_gateway.controller;
 
+import com.finsafe.idempotency_gateway.model.IdempotencyResult;
 import com.finsafe.idempotency_gateway.model.PaymentRequest;
 import com.finsafe.idempotency_gateway.model.PaymentResponse;
-import com.finsafe.idempotency_gateway.service.PaymentService;
-import org.springframework.http.HttpStatus;
+import com.finsafe.idempotency_gateway.service.IdempotencyService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -13,10 +13,10 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 public class PaymentController {
 
-    private final PaymentService paymentService;
+    private final IdempotencyService idempotencyService;
 
-    public PaymentController(PaymentService paymentService) {
-        this.paymentService = paymentService;
+    public PaymentController(IdempotencyService idempotencyService) {
+        this.idempotencyService = idempotencyService;
     }
 
     @PostMapping("/process-payment")
@@ -24,7 +24,12 @@ public class PaymentController {
             @RequestHeader("Idempotency-Key") String idempotencyKey,
             @RequestBody PaymentRequest request) {
 
-        PaymentResponse response = paymentService.charge(request);
-        return ResponseEntity.status(HttpStatus.CREATED).body(response);
+        IdempotencyResult result = idempotencyService.process(idempotencyKey, request);
+
+        ResponseEntity.BodyBuilder response = ResponseEntity.status(result.statusCode());
+        if (result.replayed()) {
+            response.header("X-Cache-Hit", "true");
+        }
+        return response.body(result.response());
     }
 }
