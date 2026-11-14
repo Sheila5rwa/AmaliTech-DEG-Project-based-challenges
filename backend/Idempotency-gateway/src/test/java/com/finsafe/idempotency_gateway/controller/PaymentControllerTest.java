@@ -18,6 +18,16 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import org.springframework.test.web.servlet.MvcResult;
+
+import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
+
 @SpringBootTest
 class PaymentControllerTest {
 
@@ -129,7 +139,46 @@ class PaymentControllerTest {
                 .andExpect(status().isCreated())
                 .andExpect(header().doesNotExist("X-Cache-Hit"));
     }
+    // Bonus: two identical requests at the same time -> charged once, B waits for A
+    @Test
+    void concurrentRequestsWithSameKey_areChargedOnlyOnce() throws Exception {
+        String key = newKey();
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        CountDownLatch startTogether = new CountDownLatch(1);
 
+        Callable<MvcResult> sendPayment = () -> {
+            startTogether.await();
+            return pay(key, PAYMENT_100).andReturn();
+        };
+
+        Future<MvcResult> requestA = executor.submit(sendPayment);
+        Future<MvcResult> requestB = executor.submit(sendPayment);
+
+        long start = System.currentTimeMillis();
+        startTogether.countDown(); // release both requests at the same moment
+
+        MvcResult resultA = requestA.get(10, TimeUnit.SECONDS);
+        MvcResult resultB = requestB.get(10, TimeUnit.SECONDS);
+        long elapsed = System.currentTimeMillis() - start;
+        executor.shutdown();
+
+        // Both succeed with 201 (B does NOT get a 409)
+        assertThat(resultA.getResponse().getStatus()).isEqualTo(201);
+        assertThat(resultB.getResponse().getStatus()).isEqualTo(201);
+
+        // Same body = same transactionId = charged only once
+        assertThat(resultA.getResponse().getContentAsString())
+                .isEqualTo(resultB.getResponse().getContentAsString());
+
+        // Exactly one of them was a replay
+        long replays = Stream.of(resultA, resultB)
+                .filter(r -> "true".equals(r.getResponse().getHeader("X-Cache-Hit")))
+                .count();
+        assertThat(replays).isEqualTo(1);
+
+        // ~2s total, not ~4s (the payment was not processed twice)
+        assertThat(elapsed).isLessThan(3500);
+    }
     // ---------- helpers ----------
 
     private ResultActions pay(String key, String json) throws Exception {
